@@ -1313,6 +1313,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     BOOL sameSize = _feedbackImage &&
         fabs(_feedbackSize.width - bounds.size.width) < 0.5 &&
         fabs(_feedbackSize.height - bounds.size.height) < 0.5;
+    if (sameSize && (_frame % 2) != 0) return;
     NSImage* previous = sameSize ? [_feedbackImage copy] : nil;
     _feedbackSize = bounds.size;
     _feedbackImage = [[NSImage alloc] initWithSize:_feedbackSize];
@@ -1401,7 +1402,8 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
             lastKind = here;
         }
 
-        for (int layer = 0; layer < 3; ++layer) {
+        int artLayers = _visibleCols > 120 ? 2 : 3;
+        for (int layer = 0; layer < artLayers; ++layer) {
             int phase = _frame / std::max(2, 6 - layer);
             int stride = 5 + static_cast<int>((lineHash >> (layer * 7)) % 11);
             int offset = static_cast<int>((lineHash >> (11 + layer * 9)) % std::max(1, stride));
@@ -1459,8 +1461,8 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
                     BOOL syntaxCell = kind != Kind::Normal && kind != Kind::Comment;
                     BOOL structuralCell = isOpenBracket(c) || isCloseBracket(c) || std::strchr("+-*/%=<>|&", c) != nullptr;
                     int memoryHeat = static_cast<int>((_memoryFootprint >> 20) % 7);
-                    BOOL movingCell = gate < (syntaxCell ? 18 + memoryHeat : 4 + memoryHeat / 2) ||
-                        (structuralCell && gate < 31 + memoryHeat);
+                    BOOL movingCell = gate < (syntaxCell ? 14 + memoryHeat : 3 + memoryHeat / 2) ||
+                        (structuralCell && gate < 24 + memoryHeat);
                     if (movingCell) {
                         int trailDir = static_cast<int>((dirIndex + kindIndex(kind) + c + bracketBalance) % directions.size());
                         if (trailDir < 0) trailDir += static_cast<int>(directions.size());
@@ -1525,8 +1527,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 
         int slabs = std::clamp<int>(1 + operators / 3 + openCount, 1, 9);
         for (int s = 0; s < slabs; ++s) {
-            uint64_t h = hashString(line.substr(0, std::min<std::size_t>(line.size(), s * 7 + 1)),
-                                    lineHash ^ static_cast<uint64_t>(s * 7919));
+            uint64_t h = hashString(line, lineHash ^ static_cast<uint64_t>(s * 7919));
             CGFloat x = fmod(static_cast<CGFloat>((h >> 11) % 10000) / 10000.0 * codeW +
                              (_frame % 64) * ((h & 1ULL) ? _charW : -_charW), codeW + 180.0) - 90.0;
             CGFloat w = (3 + static_cast<int>((h >> 23) % 11) + letters % 5) * _charW;
@@ -1539,6 +1540,8 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
             NSRectFillUsingOperation(NSMakeRect(x, y + s * 2.0, w, hgt), NSCompositingOperationSourceOver);
         }
 
+        std::string prefix = line.substr(0, std::min<std::size_t>(line.size(), 8));
+        int prefixKind = kindIndex(classifyIdentifier(prefix, _language));
         int scanlines = std::clamp<int>(2 + static_cast<int>(lineHash % 7) + operators / 2, 3, 14);
         for (int s = 0; s < scanlines; ++s) {
             uint64_t h = lineHash ^ (static_cast<uint64_t>(s + 1) * 0x9E3779B185EBCA87ULL);
@@ -1549,7 +1552,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
                              codeW + 260.0) - 130.0;
             int stripeChars = std::clamp<int>(4 + static_cast<int>((h >> 29) % 28) + operators, 5, 42);
             CGFloat stripeW = stripeChars * (_charW * 0.52);
-            CGFloat hue = fmod(0.58 + ((h >> 38) % 360) / 360.0 + kindIndex(classifyIdentifier(line.substr(0, std::min<std::size_t>(line.size(), 8)), _language)) * 0.019, 1.0);
+            CGFloat hue = fmod(0.58 + ((h >> 38) % 360) / 360.0 + prefixKind * 0.019, 1.0);
             CGFloat bright = 0.60 + ((h >> 44) % 35) / 100.0;
             CGFloat alpha = 0.12 + std::min<CGFloat>(0.14, (operators + openCount + letters / 12) * 0.006);
             NSColor* stripe = [NSColor colorWithCalibratedHue:hue saturation:0.98 brightness:bright alpha:alpha];
@@ -1835,26 +1838,48 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         [self overlayBracketMatches:kinds row:row];
 
         int rx = 0;
+        Kind runKind = Kind::Normal;
+        int runStart = -1;
+        auto flushRun = [&](int runEnd) {
+            if (runStart < 0 || runEnd <= runStart) return;
+            CGFloat x = codeX + (runStart - _coloff) * _charW;
+            NSRect cells = NSMakeRect(x, lineY, (runEnd - runStart) * _charW + 1.0, _lineH);
+            CGFloat alpha = runKind == Kind::Normal ? 0.34 : (runKind == Kind::Comment ? 0.44 : 0.76);
+            if (runKind == Kind::Search || runKind == Kind::Match) alpha = 0.92;
+            [[[self colorForKind:runKind row:row col:runStart background:YES active:active] colorWithAlphaComponent:alpha] setFill];
+            NSRectFillUsingOperation(cells, NSCompositingOperationSourceOver);
+            runStart = -1;
+        };
         for (std::size_t i = 0; i < _rows[row].size(); ++i) {
             char c = _rows[row][i];
             int width = (c == '\t') ? (TAB_STOP - (rx % TAB_STOP)) : 1;
             Kind kind = i < kinds.size() ? kinds[i] : Kind::Normal;
             for (int w = 0; w < width; ++w) {
                 if (rx >= _coloff && rx < _coloff + _visibleCols) {
-                    CGFloat x = codeX + (rx - _coloff) * _charW;
-                    NSRect cell = NSMakeRect(x, lineY, _charW + 1.0, _lineH);
-                    CGFloat alpha = kind == Kind::Normal ? 0.34 : (kind == Kind::Comment ? 0.44 : 0.76);
-                    if (kind == Kind::Search || kind == Kind::Match) alpha = 0.92;
-                    [[[self colorForKind:kind row:row col:rx background:YES active:active] colorWithAlphaComponent:alpha] setFill];
-                    NSRectFillUsingOperation(cell, NSCompositingOperationSourceOver);
-                    if ([self isSelectedRow:row col:rx]) {
+                    BOOL selected = [self isSelectedRow:row col:rx];
+                    if (selected) {
+                        flushRun(rx);
+                        CGFloat x = codeX + (rx - _coloff) * _charW;
+                        NSRect cell = NSMakeRect(x, lineY, _charW + 1.0, _lineH);
+                        CGFloat alpha = kind == Kind::Normal ? 0.34 : (kind == Kind::Comment ? 0.44 : 0.76);
+                        if (kind == Kind::Search || kind == Kind::Match) alpha = 0.92;
+                        [[[self colorForKind:kind row:row col:rx background:YES active:active] colorWithAlphaComponent:alpha] setFill];
+                        NSRectFillUsingOperation(cell, NSCompositingOperationSourceOver);
                         [[NSColor colorWithCalibratedHue:0.14 saturation:0.92 brightness:1.0 alpha:0.55] setFill];
                         NSRectFillUsingOperation(cell, NSCompositingOperationSourceOver);
+                    } else if (runStart < 0) {
+                        runStart = rx;
+                        runKind = kind;
+                    } else if (kind != runKind || rx - runStart >= 4) {
+                        flushRun(rx);
+                        runStart = rx;
+                        runKind = kind;
                     }
                 }
                 ++rx;
             }
         }
+        flushRun(std::min(rx, _coloff + _visibleCols));
     }
 }
 
@@ -2062,21 +2087,25 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     [[NSColor colorWithCalibratedRed:0.035 green:0.030 blue:0.130 alpha:1.0] setFill];
     NSRectFill(rect);
     if (_rows.empty()) return;
-    CGFloat rowH = std::max<CGFloat>(1.0, rect.size.height / std::max<std::size_t>(1, _rows.size()));
-    CGFloat colW = 2.0;
-    for (std::size_t r = 0; r < _rows.size(); ++r) {
-        CGFloat y = rect.origin.y + r * rowH;
+    std::size_t rowStep = std::max<std::size_t>(1, static_cast<std::size_t>(ceil(_rows.size() / std::max<CGFloat>(1.0, rect.size.height))));
+    CGFloat rowH = std::max<CGFloat>(1.0, rect.size.height / std::max<CGFloat>(1.0, ceil(static_cast<CGFloat>(_rows.size()) / rowStep)));
+    CGFloat colW = 3.0;
+    CGFloat maxCols = std::max<CGFloat>(1.0, floor((rect.size.width - 8.0) / colW));
+    for (std::size_t r = 0, visualRow = 0; r < _rows.size(); r += rowStep, ++visualRow) {
+        CGFloat y = rect.origin.y + visualRow * rowH;
         if (y > rect.origin.y + rect.size.height) break;
-        const std::vector<Kind>& kinds = (r < _highlights.size()) ? _highlights[r] : std::vector<Kind>();
-        int cols = std::min<int>(static_cast<int>(_rows[r].size()), static_cast<int>((rect.size.width - 8) / colW));
+        const std::vector<Kind>* kinds = (r < _highlights.size()) ? &_highlights[r] : nullptr;
+        std::size_t colStep = std::max<std::size_t>(1, static_cast<std::size_t>(ceil(_rows[r].size() / maxCols)));
+        int cols = std::min<int>(static_cast<int>(maxCols), static_cast<int>(ceil(static_cast<CGFloat>(_rows[r].size()) / colStep)));
         for (int c = 0; c < cols; ++c) {
-            Kind kind = c < static_cast<int>(kinds.size()) ? kinds[c] : Kind::Normal;
-            [[self colorForKind:kind row:static_cast<int>(r) col:c background:YES active:NO] setFill];
+            std::size_t sourceCol = static_cast<std::size_t>(c) * colStep;
+            Kind kind = (kinds && sourceCol < kinds->size()) ? (*kinds)[sourceCol] : Kind::Normal;
+            [[[self colorForKind:kind row:static_cast<int>(r) col:static_cast<int>(sourceCol) background:YES active:NO] colorWithAlphaComponent:0.86] setFill];
             NSRectFill(NSMakeRect(rect.origin.x + 4 + c * colW, y, colW, rowH));
         }
     }
-    CGFloat viewY = rect.origin.y + _rowoff * rowH;
-    CGFloat viewH = std::max<CGFloat>(4.0, _visibleRows * rowH);
+    CGFloat viewY = rect.origin.y + (_rowoff / static_cast<CGFloat>(rowStep)) * rowH;
+    CGFloat viewH = std::max<CGFloat>(4.0, (_visibleRows / static_cast<CGFloat>(rowStep)) * rowH);
     [[NSColor colorWithCalibratedRed:1.0 green:1.0 blue:1.0 alpha:0.25] setStroke];
     NSBezierPath* box = [NSBezierPath bezierPathWithRect:NSMakeRect(rect.origin.x + 2, viewY, rect.size.width - 4, viewH)];
     [box setLineWidth:1.0];

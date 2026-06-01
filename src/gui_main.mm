@@ -340,7 +340,7 @@ const std::unordered_set<std::string>& cppTypes() {
         "std", "string", "vector", "array", "optional", "unordered_set",
         "size_t", "pid_t", "ifstream", "ofstream", "NSString", "NSView",
         "NSWindow", "NSColor", "NSFont", "NSEvent", "NSRect", "BOOL",
-        "CGFloat", "NSInteger", "AppDelegate", "SourceTextView"
+        "CGFloat", "NSInteger", "AppDelegate", "SourCeView"
     };
     return words;
 }
@@ -513,10 +513,10 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 
 } // namespace
 
-@interface SourceTextView : NSView
+@interface SourCeView : NSView
 @end
 
-@implementation SourceTextView {
+@implementation SourCeView {
     std::vector<std::string> _rows;
     std::vector<std::vector<Kind>> _highlights;
     std::string _filename;
@@ -661,7 +661,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     _filename.clear();
     _language = Language::SuperCollider;
     _rows = {
-        "// Source TEXT: brightly colored live-code software art",
+        "// SourCe: brightly colored live-code software art",
         "// Command-Y opens the C++/Objective-C++ source and highlights this highlighter.",
         "",
         "(",
@@ -794,7 +794,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 
 - (void)updateWindowTitle {
     [self saveActiveBufferState];
-    std::string title = "Source TEXT - " + baseName(_filename);
+    std::string title = "SourCe - " + baseName(_filename);
     if (_dirty) title += " *";
     [[self window] setTitle:nsString(title)];
 }
@@ -1720,7 +1720,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     NSFont* metaFont = [NSFont monospacedSystemFontOfSize:14.0 weight:NSFontWeightMedium];
     NSDictionary* titleAttrs = @{NSFontAttributeName: titleFont,
                                  NSForegroundColorAttributeName: [NSColor colorWithCalibratedRed:0.94 green:0.96 blue:1.0 alpha:1.0]};
-    std::string title = "Source TEXT";
+    std::string title = "SourCe";
     [nsString(title) drawAtPoint:NSMakePoint(22.0, rect.origin.y + 11.0) withAttributes:titleAttrs];
 
     NSDictionary* metaAttrs = @{NSFontAttributeName: metaFont,
@@ -1996,7 +1996,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
             std::string tag;
             if (sourceLine.find("drawMemoryMap") != std::string::npos) tag = "SELF: MEMORY VISUAL";
             else if (sourceLine.find("updateFeedbackLayer") != std::string::npos) tag = "SELF: FEEDBACK ENGINE";
-            else if (sourceLine.find("drawArtBackdrop") != std::string::npos) tag = "SELF: SOURCE TEXTURE";
+            else if (sourceLine.find("drawArtBackdrop") != std::string::npos) tag = "SELF: SourCe TEXTURE";
             else if (sourceLine.find("sampleMemory") != std::string::npos) tag = "SELF: MEMORY SENSOR";
             else if (sourceLine.find("recordEditAtRow") != std::string::npos) tag = "SELF: EDIT TRACE";
             if (!tag.empty()) {
@@ -2869,7 +2869,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         [self setStatus:exe + " was not found in PATH."];
         return;
     }
-    std::string path = "/tmp/source_text_eval_" + std::to_string(getpid()) + ext;
+    std::string path = "/tmp/SourCe_eval_" + std::to_string(getpid()) + ext;
     std::ofstream out(path);
     out << snippet;
     out.close();
@@ -3041,7 +3041,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 
 @implementation AppDelegate {
     NSWindow* _window;
-    SourceTextView* _view;
+    SourCeView* _view;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)notification {
@@ -3054,7 +3054,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
                                                     NSWindowStyleMaskMiniaturizable
                                             backing:NSBackingStoreBuffered
                                               defer:NO];
-    _view = [[SourceTextView alloc] initWithFrame:[[_window contentView] bounds]];
+    _view = [[SourCeView alloc] initWithFrame:[[_window contentView] bounds]];
     [_view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
     [[_window contentView] addSubview:_view];
     [_window makeKeyAndOrderFront:nil];
@@ -3086,9 +3086,9 @@ void buildMenu() {
 
     NSMenuItem* appItem = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
     [menubar addItem:appItem];
-    NSMenu* appMenu = [[NSMenu alloc] initWithTitle:@"Source TEXT"];
+    NSMenu* appMenu = [[NSMenu alloc] initWithTitle:@"SourCe"];
     [appItem setSubmenu:appMenu];
-    [appMenu addItemWithTitle:@"Quit Source TEXT" action:@selector(terminate:) keyEquivalent:@"q"];
+    [appMenu addItemWithTitle:@"Quit SourCe" action:@selector(terminate:) keyEquivalent:@"q"];
 
     NSMenuItem* fileItem = [[NSMenuItem alloc] initWithTitle:@"File" action:nil keyEquivalent:@""];
     [menubar addItem:fileItem];
@@ -3117,11 +3117,11 @@ void buildMenu() {
     [runMenu addItemWithTitle:@"Stop Sketch" action:@selector(stopRun:) keyEquivalent:@"t"];
 }
 
-@interface SourceTextView (MenuActions)
+@interface SourCeView (MenuActions)
 - (void)findNextMenu:(id)sender;
 @end
 
-@implementation SourceTextView (MenuActions)
+@implementation SourCeView (MenuActions)
 - (void)findNextMenu:(id)sender {
     (void)sender;
     [self findNext:YES fromCurrent:NO];
@@ -3133,7 +3133,7 @@ int main(int argc, const char* argv[]) {
         std::string arg = argv[1];
         if (arg == "--help" || arg == "-h") {
             std::cout
-                << "Source TEXT " << JUICY_VERSION << "\n"
+                << "SourCe " << JUICY_VERSION << "\n"
                 << "Usage: " << argv[0] << " [file]\n"
                 << "       " << argv[0] << " --self\n";
             return 0;

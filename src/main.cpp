@@ -539,7 +539,7 @@ class Terminal {
 public:
     void enable() {
         if (!isatty(STDIN_FILENO)) {
-            throw std::runtime_error("Source TEXT needs an interactive terminal.");
+            throw std::runtime_error("SourCe needs an interactive terminal.");
         }
         if (tcgetattr(STDIN_FILENO, &original_) == -1) {
             throw std::runtime_error("Could not read terminal settings.");
@@ -651,7 +651,7 @@ public:
         filename_.clear();
         language_ = Language::SuperCollider;
         rows_ = {
-            "// Source TEXT: a juicy SuperCollider and ChucK editor",
+            "// SourCe: a juicy SuperCollider and ChucK editor",
             "// Ctrl-Y opens the C++ source and highlights the highlighter itself.",
             "",
             "(",
@@ -1018,7 +1018,7 @@ private:
 
     void drawHelp(std::string& out) {
         std::vector<std::string> lines = {
-            " Source TEXT ",
+            " SourCe ",
             " Ctrl-S save        Ctrl-O open        Ctrl-Q quit ",
             " Ctrl-F search      Ctrl-N next        Ctrl-J goto line ",
             " Ctrl-R run         Ctrl-T stop        Ctrl-L cycle language ",
@@ -1731,7 +1731,7 @@ private:
 
 void printUsage(const char* argv0) {
     std::cout
-        << "Source TEXT " << JUICY_VERSION << "\n"
+        << "SourCe " << JUICY_VERSION << "\n"
         << "Usage: " << argv0 << " [file]\n"
         << "       " << argv0 << " --self\n\n"
         << "A colorful terminal editor for SuperCollider and ChucK.\n";
@@ -1769,7 +1769,7 @@ int main(int argc, char** argv) {
         return 0;
     } catch (const std::exception& e) {
         Terminal::writeOut("\x1b[0m\x1b[?25h\x1b[?1049l");
-        std::cerr << "source_text: " << e.what() << "\n";
+        std::cerr << "SourCe: " << e.what() << "\n";
         return 1;
     }
 }

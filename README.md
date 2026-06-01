@@ -1,6 +1,6 @@
-# Source TEXT
+# SourCe
 
-Source TEXT is a bright C++/Objective-C++ macOS code editor tuned for
+SourCe is a bright C++/Objective-C++ macOS code editor tuned for
 SuperCollider (`.scd`, `.sc`) and ChucK (`.ck`). It renders source as a
 multi-colored blocky code field with layered animated feedback trails. The
 visual system is driven by the buffer itself: token kinds, characters, line
@@ -13,7 +13,7 @@ editor can open and colorize its own source code.
 ## Build
 
 ```sh
-cd "/Users/user/Documents/Source TEXT"
+cd "/Users/user/Documents/SourCe"
 cmake -S . -B build
 cmake --build build
 ```
@@ -21,10 +21,10 @@ cmake --build build
 Run it:
 
 ```sh
-cd "/Users/user/Documents/Source TEXT"
-./build/source_text examples/neon.scd
-./build/source_text examples/pulse.ck
-./build/source_text --self
+cd "/Users/user/Documents/SourCe"
+./build/SourCe examples/neon.scd
+./build/SourCe examples/pulse.ck
+./build/SourCe --self
 ```
 
 ## Controls
@@ -55,7 +55,7 @@ cd "/Users/user/Documents/Source TEXT"
 The editor includes line numbers, search highlights, bracket matching,
 auto-pairs, auto-indent, mouse scrolling, file dialogs, a runner output panel,
 command prompts, undo/redo, keyboard and mouse selection with clipboard
-support, file tabs, a project/outline sidebar, find/replace via the command
+support, file tabs, find/replace via the command
 palette, syntax fold markers, runner error line highlighting, evaluate
 selection/current-line/current-block commands, dirty-state tracking,
 insert/delete traces, self-source annotations, a `Command-I` process map,
@@ -63,5 +63,5 @@ insert/delete traces, self-source annotations, a `Command-I` process map,
 history, and colorful tokenization for SuperCollider, ChucK, and C++.
 
 Use `Command-P` and type `replace` to enter replacements as `old => new`.
-Use the left rail to open nearby project files or jump to symbols such as
-`SynthDef`, `Pbind`, ChucK functions/classes, and C++ function-like blocks.
+Use the tabs to move between open buffers, and `Command-J` to jump quickly
+through longer live-code files.

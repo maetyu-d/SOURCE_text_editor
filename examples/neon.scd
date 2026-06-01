@@ -1,4 +1,4 @@
-// SuperCollider neon sketch for Source TEXT
+// SuperCollider neon sketch for SourCe
 (
 SynthDef(\neonRipple, { |freq = 110, amp = 0.18, pan = 0|
     var pulse = Impulse.kr(6);

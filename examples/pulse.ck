@@ -1,4 +1,4 @@
-// ChucK pulse sketch for Source TEXT
+// ChucK pulse sketch for SourCe
 SinOsc carrier => ADSR env => Pan2 pan => dac;
 TriOsc wobble => blackhole;
 

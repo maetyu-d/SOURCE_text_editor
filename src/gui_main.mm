@@ -609,7 +609,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         _memoryFootprint = 0;
         _memoryVirtual = 0;
         _activeBuffer = -1;
-        _sidebarW = 230.0;
+        _sidebarW = 0.0;
         _dragSelecting = NO;
         [self refreshFont];
         [self sampleMemory];
@@ -1214,19 +1214,18 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     CGFloat minimapW = 64.0;
     CGFloat gutterW = std::max<CGFloat>(54.0, (std::to_string(std::max<std::size_t>(1, _rows.size())).size() + 2) * _charW);
     CGFloat editorH = std::max<CGFloat>(1.0, bounds.size.height - topH - statusH - promptH - consoleH);
-    CGFloat editorW = std::max<CGFloat>(1.0, bounds.size.width - _sidebarW - gutterW - minimapW - 12.0);
+    CGFloat editorW = std::max<CGFloat>(1.0, bounds.size.width - gutterW - minimapW - 12.0);
     _visibleRows = std::max(1, static_cast<int>(floor(editorH / _lineH)));
     _visibleCols = std::max(1, static_cast<int>(floor(editorW / _charW)));
     [self scrollToCursor];
     [self updateVisibleTokenCount];
 
-    NSRect codeRect = NSMakeRect(_sidebarW, topH, bounds.size.width - _sidebarW - minimapW, editorH);
+    NSRect codeRect = NSMakeRect(0.0, topH, bounds.size.width - minimapW, editorH);
     [self updateFeedbackLayer:bounds codeRect:codeRect gutter:gutterW];
 
     [self drawArtBackdrop:bounds];
     [self drawMemoryMap:NSMakeRect(0, topH, bounds.size.width - minimapW, editorH)];
     [self drawTopBar:NSMakeRect(0, 0, bounds.size.width, topH)];
-    [self drawSidebar:NSMakeRect(0, topH, _sidebarW, editorH)];
     [self drawCodeArea:codeRect gutter:gutterW];
     [self drawMinimap:NSMakeRect(bounds.size.width - minimapW, topH, minimapW, editorH)];
     if (consoleH > 0) [self drawConsole:NSMakeRect(0, topH + editorH, bounds.size.width, consoleH)];
@@ -2322,34 +2321,14 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
             tabX += w + 4.0;
         }
     }
-    if (p.x < _sidebarW && p.y >= topH) {
-        CGFloat relY = p.y - topH;
-        if (relY < ([self bounds].size.height - topH) * 0.48 && relY >= 30.0) {
-            int idx = static_cast<int>((relY - 30.0) / 17.0);
-            if (idx >= 0 && idx < static_cast<int>(_projectFiles.size())) {
-                [self loadFileAtPath:nsString(_projectFiles[idx])];
-                return;
-            }
-        } else {
-            CGFloat outlineStart = ([self bounds].size.height - topH) * 0.52 + 20.0;
-            int idx = static_cast<int>((relY - outlineStart) / 17.0);
-            if (idx >= 0 && idx < static_cast<int>(_symbols.size())) {
-                _cy = _symbols[idx].row;
-                _cx = 0;
-                _hasSelection = false;
-                [self setNeedsDisplay:YES];
-                return;
-            }
-        }
-    }
     if (p.y >= topH && p.x >= [self bounds].size.width - minimapW) {
         CGFloat editorH = std::max<CGFloat>(1.0, [self bounds].size.height - topH - statusH);
         CGFloat ratio = std::clamp((p.y - topH) / editorH, 0.0, 1.0);
         _cy = std::clamp<int>(ratio * _rows.size(), 0, std::max(0, static_cast<int>(_rows.size()) - 1));
         _cx = std::min<int>(_cx, _rows[_cy].size());
-    } else if (p.y >= topH && p.x >= _sidebarW) {
+    } else if (p.y >= topH) {
         int row = _rowoff + static_cast<int>((p.y - topH) / _lineH);
-        int col = _coloff + std::max(0, static_cast<int>((p.x - _sidebarW - gutterW) / _charW));
+        int col = _coloff + std::max(0, static_cast<int>((p.x - gutterW) / _charW));
         if (row >= 0 && row < static_cast<int>(_rows.size())) {
             _cy = row;
             _cx = std::clamp<int>(col, 0, _rows[_cy].size());
@@ -2367,7 +2346,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     CGFloat topH = 72.0;
     CGFloat gutterW = std::max<CGFloat>(54.0, (std::to_string(std::max<std::size_t>(1, _rows.size())).size() + 2) * _charW);
     int row = _rowoff + static_cast<int>((p.y - topH) / _lineH);
-    int col = _coloff + std::max(0, static_cast<int>((p.x - _sidebarW - gutterW) / _charW));
+    int col = _coloff + std::max(0, static_cast<int>((p.x - gutterW) / _charW));
     row = std::clamp(row, 0, std::max(0, static_cast<int>(_rows.size()) - 1));
     _cy = row;
     _cx = std::clamp<int>(col, 0, _rows[_cy].size());

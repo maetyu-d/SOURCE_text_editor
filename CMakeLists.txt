@@ -6,9 +6,18 @@ if(NOT APPLE)
   message(FATAL_ERROR "The GUI build uses native macOS Cocoa. Build this on macOS, or restore src/main.cpp for the terminal version.")
 endif()
 
-add_executable(SourCe src/gui_main.mm)
+add_executable(SourCe MACOSX_BUNDLE src/gui_main.mm)
 target_compile_features(SourCe PRIVATE cxx_std_17)
 target_link_libraries(SourCe PRIVATE "-framework Cocoa")
+
+set_target_properties(SourCe PROPERTIES
+  MACOSX_BUNDLE_GUI_IDENTIFIER "art.source.sour-ce"
+  MACOSX_BUNDLE_BUNDLE_NAME "SourCe"
+  MACOSX_BUNDLE_DISPLAY_NAME "SourCe"
+  MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+  MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+  MACOSX_BUNDLE_COPYRIGHT "SourCe"
+)
 
 target_compile_definitions(SourCe
   PRIVATE

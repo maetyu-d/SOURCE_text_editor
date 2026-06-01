@@ -27,6 +27,12 @@ cd "/Users/user/Documents/SourCe"
 ./build/SourCe --self
 ```
 
+Release zip:
+
+```sh
+open SourCe.app
+```
+
 ## Controls
 
 | Key | Action |

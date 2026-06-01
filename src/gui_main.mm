@@ -9,6 +9,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
 #include <iomanip>
@@ -18,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <unordered_set>
@@ -89,6 +91,22 @@ struct FoldRange {
     int end = 0;
 };
 
+struct BufferState {
+    std::string filename;
+    std::vector<std::string> rows;
+    Language language = Language::Plain;
+    bool dirty = false;
+    int cx = 0;
+    int cy = 0;
+    int rowoff = 0;
+    int coloff = 0;
+};
+
+struct SymbolEntry {
+    int row = 0;
+    std::string label;
+};
+
 bool beforeOrEqual(Position a, Position b) {
     return a.row < b.row || (a.row == b.row && a.col <= b.col);
 }
@@ -128,6 +146,13 @@ std::string baseName(const std::string& path) {
     if (path.empty()) return "Untitled";
     std::size_t slash = path.find_last_of('/');
     return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+std::string dirName(const std::string& path) {
+    std::size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos) return ".";
+    if (slash == 0) return "/";
+    return path.substr(0, slash);
 }
 
 std::string expandPath(std::string path) {
@@ -544,6 +569,12 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     uint64_t _memoryVirtual;
     std::vector<uint64_t> _memorySamples;
     std::vector<EditTrace> _editTraces;
+    std::vector<BufferState> _buffers;
+    int _activeBuffer;
+    std::vector<std::string> _projectFiles;
+    std::vector<SymbolEntry> _symbols;
+    CGFloat _sidebarW;
+    BOOL _dragSelecting;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
@@ -577,8 +608,12 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         _lastCpuSeconds = 0.0;
         _memoryFootprint = 0;
         _memoryVirtual = 0;
+        _activeBuffer = -1;
+        _sidebarW = 230.0;
+        _dragSelecting = NO;
         [self refreshFont];
         [self sampleMemory];
+        [self refreshProjectFiles];
         [self loadWelcome];
         [self setWantsLayer:YES];
     }
@@ -645,10 +680,64 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     [self setStatus:"Ready."];
     [self markHighlightDirty];
     [self updateWindowTitle];
+    _buffers.clear();
+    _activeBuffer = 0;
+    _buffers.push_back(BufferState{_filename, _rows, _language, _dirty, _cx, _cy, _rowoff, _coloff});
+    [self rebuildSymbols];
+}
+
+- (void)saveActiveBufferState {
+    if (_activeBuffer < 0 || _activeBuffer >= static_cast<int>(_buffers.size())) return;
+    _buffers[_activeBuffer] = BufferState{_filename, _rows, _language, _dirty, _cx, _cy, _rowoff, _coloff};
+}
+
+- (void)loadBufferAtIndex:(int)index {
+    if (index < 0 || index >= static_cast<int>(_buffers.size())) return;
+    [self saveActiveBufferState];
+    _activeBuffer = index;
+    const BufferState& buffer = _buffers[index];
+    _filename = buffer.filename;
+    _rows = buffer.rows.empty() ? std::vector<std::string>{""} : buffer.rows;
+    _language = buffer.language;
+    _dirty = buffer.dirty;
+    _cx = buffer.cx;
+    _cy = buffer.cy;
+    _rowoff = buffer.rowoff;
+    _coloff = buffer.coloff;
+    _hasSelection = false;
+    _folds.clear();
+    [self rebuildSymbols];
+    [self updateWindowTitle];
+    [self markHighlightDirty];
+}
+
+- (void)addOrSwitchToBufferForPath:(const std::string&)path rows:(const std::vector<std::string>&)rows language:(Language)language {
+    [self saveActiveBufferState];
+    for (int i = 0; i < static_cast<int>(_buffers.size()); ++i) {
+        if (_buffers[i].filename == path) {
+            _activeBuffer = i;
+            _buffers[i].rows = rows;
+            _buffers[i].language = language;
+            _buffers[i].dirty = false;
+            _buffers[i].cx = _buffers[i].cy = _buffers[i].rowoff = _buffers[i].coloff = 0;
+            [self loadBufferAtIndex:i];
+            return;
+        }
+    }
+    _buffers.push_back(BufferState{path, rows, language, false, 0, 0, 0, 0});
+    [self loadBufferAtIndex:static_cast<int>(_buffers.size()) - 1];
+}
+
+- (void)switchBufferBy:(int)delta {
+    if (_buffers.empty()) return;
+    int next = (_activeBuffer + delta + static_cast<int>(_buffers.size())) % static_cast<int>(_buffers.size());
+    [self loadBufferAtIndex:next];
+    [self setStatus:"Buffer: " + baseName(_filename)];
 }
 
 - (void)markHighlightDirty {
     _highlightDirty = true;
+    [self rebuildSymbols];
     [self setNeedsDisplay:YES];
 }
 
@@ -704,6 +793,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 }
 
 - (void)updateWindowTitle {
+    [self saveActiveBufferState];
     std::string title = "Source TEXT - " + baseName(_filename);
     if (_dirty) title += " *";
     [[self window] setTitle:nsString(title)];
@@ -745,14 +835,13 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         loaded.push_back(line);
     }
     if (loaded.empty()) loaded.push_back("");
-    _rows = std::move(loaded);
-    _filename = path;
-    _language = detectLanguage(_filename, _rows);
-    _dirty = false;
-    _cx = _cy = _rowoff = _coloff = 0;
+    Language loadedLanguage = detectLanguage(path, loaded);
     _searchTerm.clear();
+    [self addOrSwitchToBufferForPath:path rows:loaded language:loadedLanguage];
     [self markHighlightDirty];
     [self updateWindowTitle];
+    [self refreshProjectFiles];
+    [self rebuildSymbols];
     [self setStatus:"Opened " + baseName(_filename) + " as " + languageName(_language) + "."];
     return YES;
 }
@@ -773,6 +862,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     }
     _dirty = false;
     _language = detectLanguage(_filename, _rows);
+    [self saveActiveBufferState];
     [self markHighlightDirty];
     [self updateWindowTitle];
     [self setStatus:"Saved " + baseName(_filename) + "."];
@@ -953,6 +1043,10 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     _language = Language::SuperCollider;
     _dirty = false;
     _cx = _cy = _rowoff = _coloff = 0;
+    [self saveActiveBufferState];
+    _buffers.push_back(BufferState{_filename, _rows, _language, _dirty, _cx, _cy, _rowoff, _coloff});
+    _activeBuffer = static_cast<int>(_buffers.size()) - 1;
+    [self rebuildSymbols];
     [self markHighlightDirty];
     [self updateWindowTitle];
 }
@@ -1042,6 +1136,54 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     }
 }
 
+- (void)refreshProjectFiles {
+    _projectFiles.clear();
+    std::string root = _filename.empty() ? std::string(".") : dirName(_filename);
+    DIR* dir = opendir(root.c_str());
+    if (!dir) return;
+    while (dirent* entry = readdir(dir)) {
+        std::string name = entry->d_name;
+        if (name.empty() || name[0] == '.') continue;
+        std::string path = root + "/" + name;
+        struct stat st{};
+        if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+            std::string lower = toLower(name);
+            if (endsWith(lower, ".scd") || endsWith(lower, ".sc") || endsWith(lower, ".ck") ||
+                endsWith(lower, ".cpp") || endsWith(lower, ".hpp") || endsWith(lower, ".h") ||
+                endsWith(lower, ".mm") || endsWith(lower, ".txt")) {
+                _projectFiles.push_back(path);
+            }
+        }
+    }
+    closedir(dir);
+    std::sort(_projectFiles.begin(), _projectFiles.end());
+}
+
+- (void)rebuildSymbols {
+    _symbols.clear();
+    for (int row = 0; row < static_cast<int>(_rows.size()); ++row) {
+        std::string line = trim(_rows[row]);
+        if (line.empty() || line.rfind("//", 0) == 0) continue;
+        std::string label;
+        auto takeUntil = [](const std::string& s, std::size_t start) {
+            std::size_t end = s.find_first_of("({[ ,;", start);
+            return s.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        };
+        std::size_t pos = line.find("SynthDef");
+        if (pos != std::string::npos) label = "SynthDef " + line.substr(pos, std::min<std::size_t>(38, line.size() - pos));
+        else if ((pos = line.find("Pbind")) != std::string::npos) label = "Pbind";
+        else if ((pos = line.find("fun ")) != std::string::npos) label = "fun " + takeUntil(line, pos + 4);
+        else if ((pos = line.find("function ")) != std::string::npos) label = "function " + takeUntil(line, pos + 9);
+        else if ((pos = line.find("class ")) != std::string::npos) label = "class " + takeUntil(line, pos + 6);
+        else if (line.find("=> dac") != std::string::npos || line.find("spork ~") != std::string::npos) label = "shred " + line.substr(0, std::min<std::size_t>(34, line.size()));
+        else if (_language == Language::Cpp && line.find("(") != std::string::npos && line.find(")") != std::string::npos &&
+                 line.find(";") == std::string::npos && line.find("#") != 0) {
+            label = "fn " + line.substr(0, std::min<std::size_t>(38, line.size()));
+        }
+        if (!label.empty()) _symbols.push_back(SymbolEntry{row, label});
+    }
+}
+
 - (bool)isSelfSource {
     return !_filename.empty() && _filename == std::string(JUICY_SOURCE_PATH);
 }
@@ -1072,18 +1214,19 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     CGFloat minimapW = 76.0;
     CGFloat gutterW = std::max<CGFloat>(54.0, (std::to_string(std::max<std::size_t>(1, _rows.size())).size() + 2) * _charW);
     CGFloat editorH = std::max<CGFloat>(1.0, bounds.size.height - topH - statusH - promptH - consoleH);
-    CGFloat editorW = std::max<CGFloat>(1.0, bounds.size.width - gutterW - minimapW - 12.0);
+    CGFloat editorW = std::max<CGFloat>(1.0, bounds.size.width - _sidebarW - gutterW - minimapW - 12.0);
     _visibleRows = std::max(1, static_cast<int>(floor(editorH / _lineH)));
     _visibleCols = std::max(1, static_cast<int>(floor(editorW / _charW)));
     [self scrollToCursor];
     [self updateVisibleTokenCount];
 
-    NSRect codeRect = NSMakeRect(0, topH, bounds.size.width - minimapW, editorH);
+    NSRect codeRect = NSMakeRect(_sidebarW, topH, bounds.size.width - _sidebarW - minimapW, editorH);
     [self updateFeedbackLayer:bounds codeRect:codeRect gutter:gutterW];
 
     [self drawArtBackdrop:bounds];
     [self drawMemoryMap:NSMakeRect(0, topH, bounds.size.width - minimapW, editorH)];
     [self drawTopBar:NSMakeRect(0, 0, bounds.size.width, topH)];
+    [self drawSidebar:NSMakeRect(0, topH, _sidebarW, editorH)];
     [self drawCodeArea:codeRect gutter:gutterW];
     [self drawMinimap:NSMakeRect(bounds.size.width - minimapW, topH, minimapW, editorH)];
     if (consoleH > 0) [self drawConsole:NSMakeRect(0, topH + editorH, bounds.size.width, consoleH)];
@@ -1582,6 +1725,58 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     meta += "  /  mem " + formatBytes(_memoryFootprint);
     if (_runnerPid > 0) meta += "  /  running";
     [nsString(meta) drawAtPoint:NSMakePoint(170, 14) withAttributes:metaAttrs];
+
+    CGFloat tabX = 16.0;
+    CGFloat tabY = rect.origin.y + rect.size.height - 24.0;
+    NSDictionary* tabAttrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:10.0 weight:NSFontWeightBold]};
+    for (int i = 0; i < static_cast<int>(_buffers.size()); ++i) {
+        std::string label = baseName(_buffers[i].filename);
+        if (_buffers[i].dirty) label += "*";
+        CGFloat w = std::min<CGFloat>(150.0, 34.0 + label.size() * 7.0);
+        NSColor* bg = i == _activeBuffer
+            ? [NSColor colorWithCalibratedHue:0.14 saturation:0.86 brightness:0.96 alpha:0.86]
+            : [NSColor colorWithCalibratedRed:0.11 green:0.10 blue:0.24 alpha:0.75];
+        [bg setFill];
+        NSRectFillUsingOperation(NSMakeRect(tabX, tabY, w, 18.0), NSCompositingOperationSourceOver);
+        NSMutableDictionary* attrs = [tabAttrs mutableCopy];
+        attrs[NSForegroundColorAttributeName] = i == _activeBuffer
+            ? [NSColor colorWithCalibratedRed:0.05 green:0.03 blue:0.10 alpha:1.0]
+            : [NSColor colorWithCalibratedRed:0.78 green:0.90 blue:1.0 alpha:0.86];
+        [nsString(label) drawAtPoint:NSMakePoint(tabX + 6.0, tabY + 3.0) withAttributes:attrs];
+        tabX += w + 4.0;
+        if (tabX > rect.size.width - 160.0) break;
+    }
+}
+
+- (void)drawSidebar:(NSRect)rect {
+    [[NSColor colorWithCalibratedRed:0.018 green:0.018 blue:0.075 alpha:0.96] setFill];
+    NSRectFill(rect);
+    NSDictionary* headAttrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:10.0 weight:NSFontWeightBold],
+                                NSForegroundColorAttributeName: [NSColor colorWithCalibratedHue:0.14 saturation:0.80 brightness:1.0 alpha:0.92]};
+    NSDictionary* itemAttrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:10.0 weight:NSFontWeightMedium],
+                                NSForegroundColorAttributeName: [NSColor colorWithCalibratedRed:0.72 green:0.84 blue:1.0 alpha:0.78]};
+    [nsString("PROJECT") drawAtPoint:NSMakePoint(rect.origin.x + 12.0, rect.origin.y + 10.0) withAttributes:headAttrs];
+    CGFloat y = rect.origin.y + 30.0;
+    for (std::size_t i = 0; i < _projectFiles.size() && y < rect.origin.y + rect.size.height * 0.48; ++i) {
+        std::string label = baseName(_projectFiles[i]);
+        if (_projectFiles[i] == _filename) {
+            [[NSColor colorWithCalibratedHue:0.55 saturation:0.80 brightness:0.65 alpha:0.34] setFill];
+            NSRectFillUsingOperation(NSMakeRect(rect.origin.x + 6.0, y - 2.0, rect.size.width - 12.0, 16.0),
+                                     NSCompositingOperationSourceOver);
+        }
+        [nsString(label) drawAtPoint:NSMakePoint(rect.origin.x + 14.0, y) withAttributes:itemAttrs];
+        y += 17.0;
+    }
+    y = rect.origin.y + rect.size.height * 0.52;
+    [nsString("OUTLINE") drawAtPoint:NSMakePoint(rect.origin.x + 12.0, y) withAttributes:headAttrs];
+    y += 20.0;
+    for (const SymbolEntry& symbol : _symbols) {
+        if (y > rect.origin.y + rect.size.height - 18.0) break;
+        std::ostringstream label;
+        label << (symbol.row + 1) << " " << symbol.label;
+        [nsString(label.str()) drawAtPoint:NSMakePoint(rect.origin.x + 14.0, y) withAttributes:itemAttrs];
+        y += 17.0;
+    }
 }
 
 - (void)drawCodeArea:(NSRect)rect gutter:(CGFloat)gutterW {
@@ -1616,7 +1811,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 }
 
 - (void)drawCodeCellBackgrounds:(NSRect)rect gutter:(CGFloat)gutterW {
-    CGFloat codeX = gutterW;
+    CGFloat codeX = rect.origin.x + gutterW;
     for (int y = 0; y < _visibleRows; ++y) {
         int row = _rowoff + y;
         CGFloat lineY = rect.origin.y + y * _lineH;
@@ -1730,7 +1925,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     NSDictionary* attrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:9.0 weight:NSFontWeightBold],
                             NSForegroundColorAttributeName: [NSColor colorWithCalibratedRed:0.78 green:0.92 blue:1.0 alpha:0.32]};
     for (std::size_t i = 0; i < labels.size(); ++i) {
-        CGFloat x = gutterW + fmod(static_cast<CGFloat>((h >> (i * 7)) & 0x3FF) / 1024.0 * std::max<CGFloat>(1.0, rect.size.width - gutterW - 90.0) +
+        CGFloat x = rect.origin.x + gutterW + fmod(static_cast<CGFloat>((h >> (i * 7)) & 0x3FF) / 1024.0 * std::max<CGFloat>(1.0, rect.size.width - gutterW - 90.0) +
                                   _frame * (0.05 + i * 0.015), std::max<CGFloat>(1.0, rect.size.width - gutterW - 90.0));
         CGFloat y = rect.origin.y + 8.0 + fmod(static_cast<CGFloat>((h >> (i * 9 + 3)) & 0x3FF) / 1024.0 * std::max<CGFloat>(1.0, rect.size.height - 26.0) +
                                              _frame * (0.025 + i * 0.008), std::max<CGFloat>(1.0, rect.size.height - 26.0));
@@ -1740,7 +1935,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 }
 
 - (void)drawCodeGlyphs:(NSRect)rect gutter:(CGFloat)gutterW {
-    CGFloat codeX = gutterW;
+    CGFloat codeX = rect.origin.x + gutterW;
     for (int y = 0; y < _visibleRows; ++y) {
         int row = _rowoff + y;
         CGFloat lineY = rect.origin.y + y * _lineH;
@@ -1751,7 +1946,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
                 NSDictionary* foldAttrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:std::max<CGFloat>(10.0, _fontSize * 0.62)
                                                                                               weight:NSFontWeightBold],
                                             NSForegroundColorAttributeName: [NSColor colorWithCalibratedHue:0.15 saturation:0.70 brightness:1.0 alpha:0.80]};
-                [nsString("... folded syntax block ...") drawAtPoint:NSMakePoint(gutterW + 8.0, lineY + 5.0)
+                [nsString("... folded syntax block ...") drawAtPoint:NSMakePoint(rect.origin.x + gutterW + 8.0, lineY + 5.0)
                                                        withAttributes:foldAttrs];
             }
             continue;
@@ -1760,7 +1955,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
             NSDictionary* foldAttrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:10.0 weight:NSFontWeightBold],
                                         NSForegroundColorAttributeName: [NSColor colorWithCalibratedHue:0.15 saturation:0.72 brightness:1.0 alpha:0.88]};
             std::string label = "  FOLD " + std::to_string(fold->end - fold->start) + " lines";
-            [nsString(label) drawAtPoint:NSMakePoint(std::max<CGFloat>(gutterW + 8.0, rect.size.width - 160.0), lineY + 5.0)
+            [nsString(label) drawAtPoint:NSMakePoint(std::max<CGFloat>(rect.origin.x + gutterW + 8.0, rect.origin.x + rect.size.width - 160.0), lineY + 5.0)
                           withAttributes:foldAttrs];
         }
 
@@ -1774,11 +1969,11 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
             else if (sourceLine.find("recordEditAtRow") != std::string::npos) tag = "SELF: EDIT TRACE";
             if (!tag.empty()) {
                 [[NSColor colorWithCalibratedHue:0.14 saturation:0.92 brightness:1.0 alpha:0.20] setFill];
-                NSRectFillUsingOperation(NSMakeRect(gutterW, lineY, rect.size.width - gutterW, _lineH),
+                NSRectFillUsingOperation(NSMakeRect(rect.origin.x + gutterW, lineY, rect.size.width - gutterW, _lineH),
                                          NSCompositingOperationSourceOver);
                 NSDictionary* tagAttrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:10.0 weight:NSFontWeightBold],
                                            NSForegroundColorAttributeName: [NSColor colorWithCalibratedHue:0.14 saturation:0.50 brightness:1.0 alpha:0.86]};
-                [nsString(tag) drawAtPoint:NSMakePoint(std::max<CGFloat>(gutterW + 8.0, rect.size.width - 230.0), lineY + 5.0)
+                [nsString(tag) drawAtPoint:NSMakePoint(std::max<CGFloat>(rect.origin.x + gutterW + 8.0, rect.origin.x + rect.size.width - 230.0), lineY + 5.0)
                             withAttributes:tagAttrs];
             }
         }
@@ -1789,7 +1984,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
                                           : [NSColor colorWithCalibratedRed:0.54 green:0.64 blue:0.92 alpha:0.95]};
         std::ostringstream n;
         n << row + 1;
-        [nsString(n.str()) drawAtPoint:NSMakePoint(12, lineY + 4) withAttributes:numberAttrs];
+        [nsString(n.str()) drawAtPoint:NSMakePoint(rect.origin.x + 12.0, lineY + 4) withAttributes:numberAttrs];
 
         std::vector<Kind> kinds = (row < static_cast<int>(_highlights.size()))
             ? _highlights[row]
@@ -1826,7 +2021,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         cursorRx < _coloff || cursorRx >= _coloff + _visibleCols) {
         return;
     }
-    CGFloat x = gutterW + (cursorRx - _coloff) * _charW;
+    CGFloat x = rect.origin.x + gutterW + (cursorRx - _coloff) * _charW;
     CGFloat y = rect.origin.y + (_cy - _rowoff) * _lineH;
     NSColor* cursor = [NSColor colorWithCalibratedHue:fmod(0.52 + _pulse * 0.06, 1.0)
                                            saturation:0.96
@@ -1960,11 +2155,15 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
             case 'l': [self cycleLanguage]; return;
             case 'y': [self openSelf:nil]; return;
             case 'd': [self duplicateLine]; return;
+            case 'e': [self runSelectionOrCurrentLine]; return;
+            case 'b': [self runCurrentBlock]; return;
             case 'p': [self showCommand:nil]; return;
             case '/': [self toggleComment]; return;
             case '=':
             case '+': _fontSize = std::min<CGFloat>(42.0, _fontSize + 1.0); [self refreshFont]; [self setNeedsDisplay:YES]; return;
             case '-': _fontSize = std::max<CGFloat>(10.0, _fontSize - 1.0); [self refreshFont]; [self setNeedsDisplay:YES]; return;
+            case '[': [self switchBufferBy:-1]; return;
+            case ']': [self switchBufferBy:1]; return;
             default: break;
         }
     }
@@ -2076,6 +2275,8 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     if (cmd == "open" || cmd == "o") [self openDocument:nil];
     else if (cmd == "save" || cmd == "write" || cmd == "w") [self saveDocument:nil];
     else if (cmd == "run" || cmd == "r") [self runBuffer];
+    else if (cmd == "eval" || cmd == "selection") [self runSelectionOrCurrentLine];
+    else if (cmd == "block") [self runCurrentBlock];
     else if (cmd == "stop" || cmd == "t") [self stopRunnerAnnounce:YES];
     else if (cmd == "search" || cmd == "find" || cmd == "f") [self showFind:nil];
     else if (cmd == "replace") [self showReplace:nil];
@@ -2099,20 +2300,76 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     CGFloat topH = 48.0;
     CGFloat minimapW = 76.0;
     CGFloat gutterW = std::max<CGFloat>(54.0, (std::to_string(std::max<std::size_t>(1, _rows.size())).size() + 2) * _charW);
+    if (p.y < topH && p.y > topH - 24.0) {
+        CGFloat tabX = 16.0;
+        for (int i = 0; i < static_cast<int>(_buffers.size()); ++i) {
+            std::string label = baseName(_buffers[i].filename);
+            if (_buffers[i].dirty) label += "*";
+            CGFloat w = std::min<CGFloat>(150.0, 34.0 + label.size() * 7.0);
+            if (p.x >= tabX && p.x <= tabX + w) {
+                [self loadBufferAtIndex:i];
+                return;
+            }
+            tabX += w + 4.0;
+        }
+    }
+    if (p.x < _sidebarW && p.y >= topH) {
+        CGFloat relY = p.y - topH;
+        if (relY < ([self bounds].size.height - topH) * 0.48 && relY >= 30.0) {
+            int idx = static_cast<int>((relY - 30.0) / 17.0);
+            if (idx >= 0 && idx < static_cast<int>(_projectFiles.size())) {
+                [self loadFileAtPath:nsString(_projectFiles[idx])];
+                return;
+            }
+        } else {
+            CGFloat outlineStart = ([self bounds].size.height - topH) * 0.52 + 20.0;
+            int idx = static_cast<int>((relY - outlineStart) / 17.0);
+            if (idx >= 0 && idx < static_cast<int>(_symbols.size())) {
+                _cy = _symbols[idx].row;
+                _cx = 0;
+                _hasSelection = false;
+                [self setNeedsDisplay:YES];
+                return;
+            }
+        }
+    }
     if (p.y >= topH && p.x >= [self bounds].size.width - minimapW) {
         CGFloat editorH = std::max<CGFloat>(1.0, [self bounds].size.height - topH - 34.0);
         CGFloat ratio = std::clamp((p.y - topH) / editorH, 0.0, 1.0);
         _cy = std::clamp<int>(ratio * _rows.size(), 0, std::max(0, static_cast<int>(_rows.size()) - 1));
         _cx = std::min<int>(_cx, _rows[_cy].size());
-    } else if (p.y >= topH) {
+    } else if (p.y >= topH && p.x >= _sidebarW) {
         int row = _rowoff + static_cast<int>((p.y - topH) / _lineH);
-        int col = _coloff + std::max(0, static_cast<int>((p.x - gutterW) / _charW));
+        int col = _coloff + std::max(0, static_cast<int>((p.x - _sidebarW - gutterW) / _charW));
         if (row >= 0 && row < static_cast<int>(_rows.size())) {
             _cy = row;
             _cx = std::clamp<int>(col, 0, _rows[_cy].size());
+            _selectionAnchor = Position{_cy, _cx};
+            _hasSelection = NO;
+            _dragSelecting = YES;
         }
     }
     [self setNeedsDisplay:YES];
+}
+
+- (void)mouseDragged:(NSEvent*)event {
+    if (!_dragSelecting) return;
+    NSPoint p = [self convertPoint:[event locationInWindow] fromView:nil];
+    CGFloat topH = 48.0;
+    CGFloat gutterW = std::max<CGFloat>(54.0, (std::to_string(std::max<std::size_t>(1, _rows.size())).size() + 2) * _charW);
+    int row = _rowoff + static_cast<int>((p.y - topH) / _lineH);
+    int col = _coloff + std::max(0, static_cast<int>((p.x - _sidebarW - gutterW) / _charW));
+    row = std::clamp(row, 0, std::max(0, static_cast<int>(_rows.size()) - 1));
+    _cy = row;
+    _cx = std::clamp<int>(col, 0, _rows[_cy].size());
+    _hasSelection = YES;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseUp:(NSEvent*)event {
+    (void)event;
+    _dragSelecting = NO;
+    if (![self hasNonEmptySelection]) _hasSelection = NO;
 }
 
 - (void)scrollWheel:(NSEvent*)event {
@@ -2572,6 +2829,54 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     }
     std::string command = exe + " " + shellQuote(_filename);
     [self startRunner:command];
+}
+
+- (void)runSnippet:(const std::string&)snippet label:(const std::string&)label {
+    if (snippet.empty()) {
+        [self setStatus:"No code to evaluate."];
+        return;
+    }
+    std::string exe;
+    std::string ext;
+    if (_language == Language::SuperCollider) {
+        exe = "sclang";
+        ext = ".scd";
+    } else if (_language == Language::ChucK) {
+        exe = "chuck";
+        ext = ".ck";
+    } else {
+        [self setStatus:"Evaluate works for SuperCollider and ChucK."];
+        return;
+    }
+    if (!commandExists(exe)) {
+        [self setStatus:exe + " was not found in PATH."];
+        return;
+    }
+    std::string path = "/tmp/source_text_eval_" + std::to_string(getpid()) + ext;
+    std::ofstream out(path);
+    out << snippet;
+    out.close();
+    [self startRunner:exe + " " + shellQuote(path)];
+    [self setStatus:"Evaluating " + label + "."];
+}
+
+- (void)runSelectionOrCurrentLine {
+    std::string snippet = [self selectedText];
+    if (snippet.empty() && _cy >= 0 && _cy < static_cast<int>(_rows.size())) snippet = _rows[_cy];
+    [self runSnippet:snippet label:"selection/current line"];
+}
+
+- (void)runCurrentBlock {
+    int start = _cy;
+    int end = _cy;
+    while (start > 0 && !trim(_rows[start - 1]).empty()) --start;
+    while (end + 1 < static_cast<int>(_rows.size()) && !trim(_rows[end + 1]).empty()) ++end;
+    std::string snippet;
+    for (int row = start; row <= end; ++row) {
+        snippet += _rows[row];
+        if (row != end) snippet += '\n';
+    }
+    [self runSnippet:snippet label:"current block"];
 }
 
 - (void)startRunner:(const std::string&)command {

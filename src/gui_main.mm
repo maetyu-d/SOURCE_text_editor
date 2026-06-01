@@ -586,7 +586,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         _cx = _cy = _rowoff = _coloff = 0;
         _visibleRows = 1;
         _visibleCols = 1;
-        _fontSize = 22.0;
+        _fontSize = 16.0;
         _hasSelection = false;
         _selectionAnchor = Position{0, 0};
         _restoringSnapshot = false;
@@ -1207,11 +1207,11 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     [[NSColor colorWithCalibratedRed:0.025 green:0.020 blue:0.120 alpha:1.0] setFill];
     NSRectFill(bounds);
 
-    CGFloat topH = 48.0;
-    CGFloat statusH = 34.0;
+    CGFloat topH = 72.0;
+    CGFloat statusH = 30.0;
     CGFloat promptH = (_promptMode == PromptMode::None) ? 0.0 : 40.0;
     CGFloat consoleH = (_console.empty() && _runnerPid <= 0) ? 0.0 : std::min<CGFloat>(130.0, bounds.size.height * 0.25);
-    CGFloat minimapW = 76.0;
+    CGFloat minimapW = 64.0;
     CGFloat gutterW = std::max<CGFloat>(54.0, (std::to_string(std::max<std::size_t>(1, _rows.size())).size() + 2) * _charW);
     CGFloat editorH = std::max<CGFloat>(1.0, bounds.size.height - topH - statusH - promptH - consoleH);
     CGFloat editorW = std::max<CGFloat>(1.0, bounds.size.width - _sidebarW - gutterW - minimapW - 12.0);
@@ -1502,9 +1502,9 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     }
     if (!_console.empty()) programHash = hashString(_console.back(), programHash);
 
-    CGFloat top = 48.0;
-    CGFloat availableH = std::max<CGFloat>(1.0, bounds.size.height - top - 34.0);
-    CGFloat codeW = std::max<CGFloat>(1.0, bounds.size.width - 76.0);
+    CGFloat top = 72.0;
+    CGFloat availableH = std::max<CGFloat>(1.0, bounds.size.height - top - 30.0);
+    CGFloat codeW = std::max<CGFloat>(1.0, bounds.size.width - 64.0);
     int rowsToDraw = std::max(1, endRow - _rowoff);
 
     NSDictionary* smallAttrsBase = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:std::max<CGFloat>(9.0, _fontSize * 0.54)
@@ -1712,37 +1712,40 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
                                            brightness:0.95
                                                 alpha:1.0];
     [stripe setFill];
-    NSRectFill(NSMakeRect(rect.origin.x, rect.origin.y + rect.size.height - 4, rect.size.width, 4));
+    NSRectFill(NSMakeRect(rect.origin.x, rect.origin.y + rect.size.height - 4.0, rect.size.width, 4.0));
 
-    NSDictionary* titleAttrs = @{NSFontAttributeName: _boldFont,
+    NSFont* titleFont = [NSFont monospacedSystemFontOfSize:20.0 weight:NSFontWeightBold];
+    NSFont* metaFont = [NSFont monospacedSystemFontOfSize:14.0 weight:NSFontWeightMedium];
+    NSDictionary* titleAttrs = @{NSFontAttributeName: titleFont,
                                  NSForegroundColorAttributeName: [NSColor colorWithCalibratedRed:0.94 green:0.96 blue:1.0 alpha:1.0]};
     std::string title = "Source TEXT";
-    [nsString(title) drawAtPoint:NSMakePoint(18, 12) withAttributes:titleAttrs];
+    [nsString(title) drawAtPoint:NSMakePoint(22.0, rect.origin.y + 11.0) withAttributes:titleAttrs];
 
-    NSDictionary* metaAttrs = @{NSFontAttributeName: _font,
+    NSDictionary* metaAttrs = @{NSFontAttributeName: metaFont,
                                 NSForegroundColorAttributeName: [NSColor colorWithCalibratedRed:0.62 green:0.80 blue:1.0 alpha:1.0]};
     std::string meta = baseName(_filename) + (_dirty ? " *" : "") + "  /  " + languageName(_language);
     meta += "  /  mem " + formatBytes(_memoryFootprint);
     if (_runnerPid > 0) meta += "  /  running";
-    [nsString(meta) drawAtPoint:NSMakePoint(170, 14) withAttributes:metaAttrs];
+    [nsString(meta) drawAtPoint:NSMakePoint(178.0, rect.origin.y + 16.0) withAttributes:metaAttrs];
 
-    CGFloat tabX = 16.0;
-    CGFloat tabY = rect.origin.y + rect.size.height - 24.0;
+    CGFloat tabX = 22.0;
+    CGFloat tabY = rect.origin.y + 44.0;
+    CGFloat tabH = 22.0;
     NSDictionary* tabAttrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:10.0 weight:NSFontWeightBold]};
     for (int i = 0; i < static_cast<int>(_buffers.size()); ++i) {
         std::string label = baseName(_buffers[i].filename);
         if (_buffers[i].dirty) label += "*";
-        CGFloat w = std::min<CGFloat>(150.0, 34.0 + label.size() * 7.0);
+        CGFloat w = std::min<CGFloat>(170.0, 38.0 + label.size() * 7.0);
         NSColor* bg = i == _activeBuffer
             ? [NSColor colorWithCalibratedHue:0.14 saturation:0.86 brightness:0.96 alpha:0.86]
             : [NSColor colorWithCalibratedRed:0.11 green:0.10 blue:0.24 alpha:0.75];
         [bg setFill];
-        NSRectFillUsingOperation(NSMakeRect(tabX, tabY, w, 18.0), NSCompositingOperationSourceOver);
+        NSRectFillUsingOperation(NSMakeRect(tabX, tabY, w, tabH), NSCompositingOperationSourceOver);
         NSMutableDictionary* attrs = [tabAttrs mutableCopy];
         attrs[NSForegroundColorAttributeName] = i == _activeBuffer
             ? [NSColor colorWithCalibratedRed:0.05 green:0.03 blue:0.10 alpha:1.0]
             : [NSColor colorWithCalibratedRed:0.78 green:0.90 blue:1.0 alpha:0.86];
-        [nsString(label) drawAtPoint:NSMakePoint(tabX + 6.0, tabY + 3.0) withAttributes:attrs];
+        [nsString(label) drawAtPoint:NSMakePoint(tabX + 8.0, tabY + 5.0) withAttributes:attrs];
         tabX += w + 4.0;
         if (tabX > rect.size.width - 160.0) break;
     }
@@ -1751,9 +1754,11 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 - (void)drawSidebar:(NSRect)rect {
     [[NSColor colorWithCalibratedRed:0.018 green:0.018 blue:0.075 alpha:0.96] setFill];
     NSRectFill(rect);
+    [[NSColor colorWithCalibratedRed:0.17 green:0.18 blue:0.34 alpha:0.65] setFill];
+    NSRectFill(NSMakeRect(rect.origin.x + rect.size.width - 1.0, rect.origin.y, 1.0, rect.size.height));
     NSDictionary* headAttrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:10.0 weight:NSFontWeightBold],
                                 NSForegroundColorAttributeName: [NSColor colorWithCalibratedHue:0.14 saturation:0.80 brightness:1.0 alpha:0.92]};
-    NSDictionary* itemAttrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:10.0 weight:NSFontWeightMedium],
+    NSDictionary* itemAttrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:10.5 weight:NSFontWeightMedium],
                                 NSForegroundColorAttributeName: [NSColor colorWithCalibratedRed:0.72 green:0.84 blue:1.0 alpha:0.78]};
     [nsString("PROJECT") drawAtPoint:NSMakePoint(rect.origin.x + 12.0, rect.origin.y + 10.0) withAttributes:headAttrs];
     CGFloat y = rect.origin.y + 30.0;
@@ -1793,11 +1798,11 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
                                   saturation:0.60
                                   brightness:0.40
                                        alpha:0.48] setFill];
-            NSRectFill(NSMakeRect(0, lineY, rect.size.width, _lineH));
+            NSRectFill(NSMakeRect(rect.origin.x, lineY, rect.size.width, _lineH));
         }
         if (row == _errorLine) {
             [[NSColor colorWithCalibratedHue:0.98 saturation:0.82 brightness:0.92 alpha:0.44] setFill];
-            NSRectFillUsingOperation(NSMakeRect(0, lineY, rect.size.width, _lineH),
+            NSRectFillUsingOperation(NSMakeRect(rect.origin.x, lineY, rect.size.width, _lineH),
                                      NSCompositingOperationSourceOver);
         }
     }
@@ -1820,7 +1825,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         if (row >= static_cast<int>(_rows.size())) continue;
         if ([self isFoldInterior:row]) {
             [[NSColor colorWithCalibratedRed:0.01 green:0.01 blue:0.04 alpha:0.82] setFill];
-            NSRectFillUsingOperation(NSMakeRect(gutterW, lineY, rect.size.width - gutterW, _lineH),
+            NSRectFillUsingOperation(NSMakeRect(rect.origin.x + gutterW, lineY, rect.size.width - gutterW, _lineH),
                                      NSCompositingOperationSourceOver);
             continue;
         }
@@ -1839,7 +1844,9 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
                 if (rx >= _coloff && rx < _coloff + _visibleCols) {
                     CGFloat x = codeX + (rx - _coloff) * _charW;
                     NSRect cell = NSMakeRect(x, lineY, _charW + 1.0, _lineH);
-                    [[self colorForKind:kind row:row col:rx background:YES active:active] setFill];
+                    CGFloat alpha = kind == Kind::Normal ? 0.34 : (kind == Kind::Comment ? 0.44 : 0.76);
+                    if (kind == Kind::Search || kind == Kind::Match) alpha = 0.92;
+                    [[[self colorForKind:kind row:row col:rx background:YES active:active] colorWithAlphaComponent:alpha] setFill];
                     NSRectFillUsingOperation(cell, NSCompositingOperationSourceOver);
                     if ([self isSelectedRow:row col:rx]) {
                         [[NSColor colorWithCalibratedHue:0.14 saturation:0.92 brightness:1.0 alpha:0.55] setFill];
@@ -1869,7 +1876,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     [_feedbackImage drawInRect:[self bounds]
                       fromRect:NSZeroRect
                      operation:NSCompositingOperationScreen
-                      fraction:0.46
+                      fraction:0.24
                 respectFlipped:YES
                          hints:nil];
     [NSGraphicsContext restoreGraphicsState];
@@ -1878,7 +1885,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 - (void)drawEditTraces:(NSRect)rect gutter:(CGFloat)gutterW {
     if (_editTraces.empty()) return;
     int now = _frame;
-    CGFloat codeX = gutterW;
+    CGFloat codeX = rect.origin.x + gutterW;
     for (const EditTrace& trace : _editTraces) {
         int age = now - trace.frame;
         if (age < 0 || age > 180) continue;
@@ -1912,6 +1919,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 }
 
 - (void)drawCausalityLabels:(NSRect)rect gutter:(CGFloat)gutterW {
+    if (!_showProcessMap) return;
     std::array<std::string, 7> labels{{
         "TOKEN",
         "BRACKET",
@@ -2297,15 +2305,16 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 - (void)mouseDown:(NSEvent*)event {
     [[self window] makeFirstResponder:self];
     NSPoint p = [self convertPoint:[event locationInWindow] fromView:nil];
-    CGFloat topH = 48.0;
-    CGFloat minimapW = 76.0;
+    CGFloat topH = 72.0;
+    CGFloat statusH = 30.0;
+    CGFloat minimapW = 64.0;
     CGFloat gutterW = std::max<CGFloat>(54.0, (std::to_string(std::max<std::size_t>(1, _rows.size())).size() + 2) * _charW);
-    if (p.y < topH && p.y > topH - 24.0) {
-        CGFloat tabX = 16.0;
+    if (p.y >= 44.0 && p.y < topH) {
+        CGFloat tabX = 22.0;
         for (int i = 0; i < static_cast<int>(_buffers.size()); ++i) {
             std::string label = baseName(_buffers[i].filename);
             if (_buffers[i].dirty) label += "*";
-            CGFloat w = std::min<CGFloat>(150.0, 34.0 + label.size() * 7.0);
+            CGFloat w = std::min<CGFloat>(170.0, 38.0 + label.size() * 7.0);
             if (p.x >= tabX && p.x <= tabX + w) {
                 [self loadBufferAtIndex:i];
                 return;
@@ -2334,7 +2343,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         }
     }
     if (p.y >= topH && p.x >= [self bounds].size.width - minimapW) {
-        CGFloat editorH = std::max<CGFloat>(1.0, [self bounds].size.height - topH - 34.0);
+        CGFloat editorH = std::max<CGFloat>(1.0, [self bounds].size.height - topH - statusH);
         CGFloat ratio = std::clamp((p.y - topH) / editorH, 0.0, 1.0);
         _cy = std::clamp<int>(ratio * _rows.size(), 0, std::max(0, static_cast<int>(_rows.size()) - 1));
         _cx = std::min<int>(_cx, _rows[_cy].size());
@@ -2355,7 +2364,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 - (void)mouseDragged:(NSEvent*)event {
     if (!_dragSelecting) return;
     NSPoint p = [self convertPoint:[event locationInWindow] fromView:nil];
-    CGFloat topH = 48.0;
+    CGFloat topH = 72.0;
     CGFloat gutterW = std::max<CGFloat>(54.0, (std::to_string(std::max<std::size_t>(1, _rows.size())).size() + 2) * _charW);
     int row = _rowoff + static_cast<int>((p.y - topH) / _lineH);
     int col = _coloff + std::max(0, static_cast<int>((p.x - _sidebarW - gutterW) / _charW));

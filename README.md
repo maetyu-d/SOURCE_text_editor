@@ -37,6 +37,9 @@ cd "/Users/user/Documents/Source TEXT"
 | `Command-G` | Next search match |
 | `Command-J` | Go to line |
 | `Command-I` | Toggle process map |
+| `Command-Z` / `Command-Shift-Z` | Undo / redo |
+| `Command-A/C/X/V` | Select all / copy / cut / paste |
+| `Command-K` | Toggle syntax fold |
 | `Command-R` | Run with `sclang` or `chuck` if installed |
 | `Command-T` | Stop the running sketch |
 | `Command-L` | Cycle language mode |
@@ -48,7 +51,11 @@ cd "/Users/user/Documents/Source TEXT"
 
 The editor includes line numbers, search highlights, bracket matching,
 auto-pairs, auto-indent, mouse scrolling, file dialogs, a runner output panel,
-command prompts, dirty-state tracking, insert/delete traces, self-source
+command prompts, undo/redo, keyboard selection with clipboard support,
+find/replace via the command palette, syntax fold markers, runner error line
+highlighting, dirty-state tracking, insert/delete traces, self-source
 annotations, a `Command-I` process map, 45/90-degree source-derived
 video-feedback trail motion, live CPU/draw/memory history, and colorful
 tokenization for SuperCollider, ChucK, and C++.
+
+Use `Command-P` and type `replace` to enter replacements as `old => new`.

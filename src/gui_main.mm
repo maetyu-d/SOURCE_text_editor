@@ -59,6 +59,7 @@ enum class PromptMode {
     None,
     Search,
     Goto,
+    Replace,
     Command
 };
 
@@ -74,6 +75,23 @@ struct EditTrace {
     int frame = 0;
     bool deletion = false;
 };
+
+struct UndoSnapshot {
+    std::vector<std::string> rows;
+    int cx = 0;
+    int cy = 0;
+    std::string filename;
+    Language language = Language::Plain;
+};
+
+struct FoldRange {
+    int start = 0;
+    int end = 0;
+};
+
+bool beforeOrEqual(Position a, Position b) {
+    return a.row < b.row || (a.row == b.row && a.col <= b.col);
+}
 
 std::string cppString(NSString* value) {
     if (!value) return {};
@@ -495,6 +513,13 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     std::string _searchTerm;
     std::optional<Position> _matchA;
     std::optional<Position> _matchB;
+    bool _hasSelection;
+    Position _selectionAnchor;
+    std::vector<UndoSnapshot> _undoStack;
+    std::vector<UndoSnapshot> _redoStack;
+    bool _restoringSnapshot;
+    std::vector<FoldRange> _folds;
+    int _errorLine;
     PromptMode _promptMode;
     std::string _promptLabel;
     std::string _promptBuffer;
@@ -531,6 +556,10 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         _visibleRows = 1;
         _visibleCols = 1;
         _fontSize = 22.0;
+        _hasSelection = false;
+        _selectionAnchor = Position{0, 0};
+        _restoringSnapshot = false;
+        _errorLine = -1;
         _promptMode = PromptMode::None;
         _runnerPid = -1;
         _runnerFd = -1;
@@ -621,6 +650,52 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 - (void)markHighlightDirty {
     _highlightDirty = true;
     [self setNeedsDisplay:YES];
+}
+
+- (void)pushUndo {
+    if (_restoringSnapshot) return;
+    _undoStack.push_back(UndoSnapshot{_rows, _cx, _cy, _filename, _language});
+    if (_undoStack.size() > 160) _undoStack.erase(_undoStack.begin());
+    _redoStack.clear();
+}
+
+- (void)restoreSnapshot:(const UndoSnapshot&)snapshot {
+    _restoringSnapshot = true;
+    _rows = snapshot.rows.empty() ? std::vector<std::string>{""} : snapshot.rows;
+    _filename = snapshot.filename;
+    _language = snapshot.language;
+    _cy = std::clamp(snapshot.cy, 0, std::max(0, static_cast<int>(_rows.size()) - 1));
+    _cx = std::clamp(snapshot.cx, 0, static_cast<int>(_rows[_cy].size()));
+    _hasSelection = false;
+    _folds.clear();
+    _dirty = true;
+    _restoringSnapshot = false;
+    [self updateWindowTitle];
+    [self markHighlightDirty];
+}
+
+- (void)undoEdit {
+    if (_undoStack.empty()) {
+        [self setStatus:"Nothing to undo."];
+        return;
+    }
+    _redoStack.push_back(UndoSnapshot{_rows, _cx, _cy, _filename, _language});
+    UndoSnapshot snapshot = _undoStack.back();
+    _undoStack.pop_back();
+    [self restoreSnapshot:snapshot];
+    [self setStatus:"Undo."];
+}
+
+- (void)redoEdit {
+    if (_redoStack.empty()) {
+        [self setStatus:"Nothing to redo."];
+        return;
+    }
+    _undoStack.push_back(UndoSnapshot{_rows, _cx, _cy, _filename, _language});
+    UndoSnapshot snapshot = _redoStack.back();
+    _redoStack.pop_back();
+    [self restoreSnapshot:snapshot];
+    [self setStatus:"Redo."];
 }
 
 - (void)setStatus:(const std::string&)message {
@@ -754,9 +829,115 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     [self setStatus:"Self-highlight mode: the editor is coloring its own source."];
 }
 
+- (std::pair<Position, Position>)selectionRange {
+    Position cursor{_cy, _cx};
+    if (beforeOrEqual(_selectionAnchor, cursor)) return {_selectionAnchor, cursor};
+    return {cursor, _selectionAnchor};
+}
+
+- (bool)hasNonEmptySelection {
+    if (!_hasSelection) return false;
+    auto range = [self selectionRange];
+    return range.first.row != range.second.row || range.first.col != range.second.col;
+}
+
+- (std::string)selectedText {
+    if (![self hasNonEmptySelection]) return "";
+    auto range = [self selectionRange];
+    std::string out;
+    for (int row = range.first.row; row <= range.second.row; ++row) {
+        int start = row == range.first.row ? range.first.col : 0;
+        int end = row == range.second.row ? range.second.col : static_cast<int>(_rows[row].size());
+        start = std::clamp(start, 0, static_cast<int>(_rows[row].size()));
+        end = std::clamp(end, start, static_cast<int>(_rows[row].size()));
+        out += _rows[row].substr(start, end - start);
+        if (row != range.second.row) out += '\n';
+    }
+    return out;
+}
+
+- (void)deleteSelectionWithoutUndo {
+    if (![self hasNonEmptySelection]) return;
+    auto range = [self selectionRange];
+    if (range.first.row == range.second.row) {
+        _rows[range.first.row].erase(range.first.col, range.second.col - range.first.col);
+    } else {
+        std::string left = _rows[range.first.row].substr(0, range.first.col);
+        std::string right = _rows[range.second.row].substr(range.second.col);
+        _rows[range.first.row] = left + right;
+        _rows.erase(_rows.begin() + range.first.row + 1, _rows.begin() + range.second.row + 1);
+    }
+    _cy = range.first.row;
+    _cx = range.first.col;
+    _hasSelection = false;
+}
+
+- (void)copySelection {
+    std::string text = [self selectedText];
+    if (text.empty()) {
+        [self setStatus:"No selection to copy."];
+        return;
+    }
+    NSPasteboard* pasteboard = [NSPasteboard generalPasteboard];
+    [pasteboard clearContents];
+    [pasteboard setString:nsString(text) forType:NSPasteboardTypeString];
+    [self setStatus:"Copied selection."];
+}
+
+- (void)cutSelection {
+    if (![self hasNonEmptySelection]) {
+        [self setStatus:"No selection to cut."];
+        return;
+    }
+    [self pushUndo];
+    [self copySelection];
+    [self deleteSelectionWithoutUndo];
+    _dirty = true;
+    [self updateWindowTitle];
+    [self markHighlightDirty];
+}
+
+- (void)selectAll {
+    if (_rows.empty()) return;
+    _selectionAnchor = Position{0, 0};
+    _cy = static_cast<int>(_rows.size()) - 1;
+    _cx = static_cast<int>(_rows.back().size());
+    _hasSelection = true;
+    [self setStatus:"Selected all."];
+}
+
+- (void)insertTextAtCursor:(const std::string&)text {
+    if (text.empty()) return;
+    [self pushUndo];
+    if ([self hasNonEmptySelection]) [self deleteSelectionWithoutUndo];
+    for (char c : text) {
+        if (c == '\n') [self insertNewlineWithoutUndo];
+        else if (c >= 32 || c == '\t') [self insertCharWithoutUndo:c];
+    }
+    _dirty = true;
+    [self updateWindowTitle];
+    [self markHighlightDirty];
+}
+
+- (void)pasteClipboard {
+    NSString* string = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
+    if (!string) {
+        [self setStatus:"Clipboard has no text."];
+        return;
+    }
+    [self insertTextAtCursor:cppString(string)];
+    [self setStatus:"Pasted."];
+}
+
 - (void)showFind:(id)sender {
     (void)sender;
     [self beginPrompt:PromptMode::Search label:"Find: " initial:_searchTerm];
+}
+
+- (void)showReplace:(id)sender {
+    (void)sender;
+    std::string initial = _searchTerm.empty() ? "old => new" : _searchTerm + " => ";
+    [self beginPrompt:PromptMode::Replace label:"Replace: " initial:initial];
 }
 
 - (void)showCommand:(id)sender {
@@ -1419,6 +1600,11 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
                                        alpha:0.48] setFill];
             NSRectFill(NSMakeRect(0, lineY, rect.size.width, _lineH));
         }
+        if (row == _errorLine) {
+            [[NSColor colorWithCalibratedHue:0.98 saturation:0.82 brightness:0.92 alpha:0.44] setFill];
+            NSRectFillUsingOperation(NSMakeRect(0, lineY, rect.size.width, _lineH),
+                                     NSCompositingOperationSourceOver);
+        }
     }
 
     [self drawCodeCellBackgrounds:rect gutter:gutterW];
@@ -1437,6 +1623,12 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         BOOL active = row == _cy;
 
         if (row >= static_cast<int>(_rows.size())) continue;
+        if ([self isFoldInterior:row]) {
+            [[NSColor colorWithCalibratedRed:0.01 green:0.01 blue:0.04 alpha:0.82] setFill];
+            NSRectFillUsingOperation(NSMakeRect(gutterW, lineY, rect.size.width - gutterW, _lineH),
+                                     NSCompositingOperationSourceOver);
+            continue;
+        }
         std::vector<Kind> kinds = (row < static_cast<int>(_highlights.size()))
             ? _highlights[row]
             : std::vector<Kind>(_rows[row].size(), Kind::Normal);
@@ -1454,11 +1646,25 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
                     NSRect cell = NSMakeRect(x, lineY, _charW + 1.0, _lineH);
                     [[self colorForKind:kind row:row col:rx background:YES active:active] setFill];
                     NSRectFillUsingOperation(cell, NSCompositingOperationSourceOver);
+                    if ([self isSelectedRow:row col:rx]) {
+                        [[NSColor colorWithCalibratedHue:0.14 saturation:0.92 brightness:1.0 alpha:0.55] setFill];
+                        NSRectFillUsingOperation(cell, NSCompositingOperationSourceOver);
+                    }
                 }
                 ++rx;
             }
         }
     }
+}
+
+- (BOOL)isSelectedRow:(int)row col:(int)col {
+    if (![self hasNonEmptySelection]) return NO;
+    auto range = [self selectionRange];
+    if (row < range.first.row || row > range.second.row) return NO;
+    if (range.first.row == range.second.row) return col >= range.first.col && col < range.second.col;
+    if (row == range.first.row) return col >= range.first.col;
+    if (row == range.second.row) return col < range.second.col;
+    return YES;
 }
 
 - (void)drawFeedbackOverlay:(NSRect)rect {
@@ -1540,6 +1746,23 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         CGFloat lineY = rect.origin.y + y * _lineH;
         BOOL active = row == _cy;
         if (row >= static_cast<int>(_rows.size())) continue;
+        if ([self isFoldInterior:row]) {
+            if (row > 0 && ![self isFoldInterior:row - 1]) {
+                NSDictionary* foldAttrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:std::max<CGFloat>(10.0, _fontSize * 0.62)
+                                                                                              weight:NSFontWeightBold],
+                                            NSForegroundColorAttributeName: [NSColor colorWithCalibratedHue:0.15 saturation:0.70 brightness:1.0 alpha:0.80]};
+                [nsString("... folded syntax block ...") drawAtPoint:NSMakePoint(gutterW + 8.0, lineY + 5.0)
+                                                       withAttributes:foldAttrs];
+            }
+            continue;
+        }
+        if (auto fold = [self foldAtStart:row]) {
+            NSDictionary* foldAttrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:10.0 weight:NSFontWeightBold],
+                                        NSForegroundColorAttributeName: [NSColor colorWithCalibratedHue:0.15 saturation:0.72 brightness:1.0 alpha:0.88]};
+            std::string label = "  FOLD " + std::to_string(fold->end - fold->start) + " lines";
+            [nsString(label) drawAtPoint:NSMakePoint(std::max<CGFloat>(gutterW + 8.0, rect.size.width - 160.0), lineY + 5.0)
+                          withAttributes:foldAttrs];
+        }
 
         if ([self isSelfSource]) {
             const std::string& sourceLine = _rows[row];
@@ -1707,14 +1930,23 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     NSEventModifierFlags flags = [event modifierFlags] & NSEventModifierFlagDeviceIndependentFlagsMask;
     BOOL command = (flags & NSEventModifierFlagCommand) != 0;
     BOOL control = (flags & NSEventModifierFlagControl) != 0;
+    BOOL shift = (flags & NSEventModifierFlagShift) != 0;
     NSString* charsIgnoring = [[event charactersIgnoringModifiers] lowercaseString];
     unichar ch = [charsIgnoring length] > 0 ? [charsIgnoring characterAtIndex:0] : 0;
 
     if (command || control) {
         switch (ch) {
+            case 'a': [self selectAll]; return;
+            case 'c': [self copySelection]; return;
             case 'n': [self newDocument:nil]; return;
             case 'o': [self openDocument:nil]; return;
             case 's': [self saveDocument:nil]; return;
+            case 'v': [self pasteClipboard]; return;
+            case 'x': [self cutSelection]; return;
+            case 'z':
+                if (shift) [self redoEdit];
+                else [self undoEdit];
+                return;
             case 'f': [self showFind:nil]; return;
             case 'g': [self findNext:YES fromCurrent:NO]; return;
             case 'i':
@@ -1722,6 +1954,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
                 [self setStatus:_showProcessMap ? "Process map visible." : "Process map hidden."];
                 return;
             case 'j': [self beginPrompt:PromptMode::Goto label:"Go to line: " initial:""]; return;
+            case 'k': [self toggleFoldAtCursor]; return;
             case 'r': [self runBuffer]; return;
             case 't': [self stopRunnerAnnounce:YES]; return;
             case 'l': [self cycleLanguage]; return;
@@ -1737,12 +1970,22 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     }
 
     switch ([event keyCode]) {
-        case 123: [self moveCursor:0]; return;
-        case 124: [self moveCursor:1]; return;
-        case 126: [self moveCursor:2]; return;
-        case 125: [self moveCursor:3]; return;
-        case 115: _cx = 0; [self setNeedsDisplay:YES]; return;
-        case 119: _cx = static_cast<int>(_rows[_cy].size()); [self setNeedsDisplay:YES]; return;
+        case 123: [self moveCursor:0 extendSelection:shift]; return;
+        case 124: [self moveCursor:1 extendSelection:shift]; return;
+        case 126: [self moveCursor:2 extendSelection:shift]; return;
+        case 125: [self moveCursor:3 extendSelection:shift]; return;
+        case 115:
+            if (shift && !_hasSelection) _selectionAnchor = Position{_cy, _cx};
+            _cx = 0;
+            _hasSelection = shift;
+            [self setNeedsDisplay:YES];
+            return;
+        case 119:
+            if (shift && !_hasSelection) _selectionAnchor = Position{_cy, _cx};
+            _cx = static_cast<int>(_rows[_cy].size());
+            _hasSelection = shift;
+            [self setNeedsDisplay:YES];
+            return;
         case 116: for (int i = 0; i < _visibleRows; ++i) [self moveCursor:2]; return;
         case 121: for (int i = 0; i < _visibleRows; ++i) [self moveCursor:3]; return;
         case 51: [self backspace]; return;
@@ -1811,6 +2054,8 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         _searchTerm = value;
         if (_searchTerm.empty()) [self setStatus:"Search cleared."];
         else [self findNext:YES fromCurrent:YES];
+    } else if (mode == PromptMode::Replace) {
+        [self replaceFromPrompt:value];
     } else if (mode == PromptMode::Goto) {
         try {
             int line = std::stoi(value);
@@ -1833,12 +2078,14 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     else if (cmd == "run" || cmd == "r") [self runBuffer];
     else if (cmd == "stop" || cmd == "t") [self stopRunnerAnnounce:YES];
     else if (cmd == "search" || cmd == "find" || cmd == "f") [self showFind:nil];
+    else if (cmd == "replace") [self showReplace:nil];
     else if (cmd == "process" || cmd == "map" || cmd == "i") {
         _showProcessMap = !_showProcessMap;
         [self setStatus:_showProcessMap ? "Process map visible." : "Process map hidden."];
     }
     else if (cmd == "goto" || cmd == "line" || cmd == "j") [self beginPrompt:PromptMode::Goto label:"Go to line: " initial:""];
     else if (cmd == "lang" || cmd == "language" || cmd == "l") [self cycleLanguage];
+    else if (cmd == "fold" || cmd == "k") [self toggleFoldAtCursor];
     else if (cmd == "self" || cmd == "source" || cmd == "y") [self openSelf:nil];
     else if (cmd == "comment" || cmd == "/") [self toggleComment];
     else if (cmd == "duplicate" || cmd == "dup" || cmd == "d") [self duplicateLine];
@@ -1878,7 +2125,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     [self setNeedsDisplay:YES];
 }
 
-- (void)insertChar:(char)c {
+- (void)insertCharWithoutUndo:(char)c {
     if (isCloseBracket(c) && _cx < static_cast<int>(_rows[_cy].size()) && _rows[_cy][_cx] == c) {
         ++_cx;
         [self setNeedsDisplay:YES];
@@ -1905,13 +2152,19 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     [self markHighlightDirty];
 }
 
+- (void)insertChar:(char)c {
+    [self pushUndo];
+    if ([self hasNonEmptySelection]) [self deleteSelectionWithoutUndo];
+    [self insertCharWithoutUndo:c];
+}
+
 - (std::string)leadingWhitespace:(const std::string&)line {
     std::size_t i = 0;
     while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
     return line.substr(0, i);
 }
 
-- (void)insertNewline {
+- (void)insertNewlineWithoutUndo {
     std::string& line = _rows[_cy];
     std::string left = line.substr(0, _cx);
     std::string right = line.substr(_cx);
@@ -1934,7 +2187,15 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     [self markHighlightDirty];
 }
 
+- (void)insertNewline {
+    [self pushUndo];
+    if ([self hasNonEmptySelection]) [self deleteSelectionWithoutUndo];
+    [self insertNewlineWithoutUndo];
+}
+
 - (void)insertTab {
+    [self pushUndo];
+    if ([self hasNonEmptySelection]) [self deleteSelectionWithoutUndo];
     int spaces = TAB_STOP - ([self rowCxToRx:_cy cx:_cx] % TAB_STOP);
     _rows[_cy].insert(_cx, std::string(spaces, ' '));
     [self recordEditAtRow:_cy col:_cx ch:'\t' deletion:NO];
@@ -1945,6 +2206,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 }
 
 - (void)outdentLine {
+    [self pushUndo];
     int removed = 0;
     while (removed < TAB_STOP && !_rows[_cy].empty() && _rows[_cy].front() == ' ') {
         _rows[_cy].erase(_rows[_cy].begin());
@@ -1961,6 +2223,14 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 
 - (void)backspace {
     if (_cy == 0 && _cx == 0) return;
+    [self pushUndo];
+    if ([self hasNonEmptySelection]) {
+        [self deleteSelectionWithoutUndo];
+        _dirty = true;
+        [self updateWindowTitle];
+        [self markHighlightDirty];
+        return;
+    }
     if (_cx > 0) {
         std::string& line = _rows[_cy];
         char before = line[_cx - 1];
@@ -1987,6 +2257,15 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 }
 
 - (void)deleteChar {
+    if ([self hasNonEmptySelection]) {
+        [self pushUndo];
+        [self deleteSelectionWithoutUndo];
+        _dirty = true;
+        [self updateWindowTitle];
+        [self markHighlightDirty];
+        return;
+    }
+    [self pushUndo];
     if (_cx < static_cast<int>(_rows[_cy].size())) {
         [self recordEditAtRow:_cy col:_cx ch:_rows[_cy][_cx] deletion:YES];
         _rows[_cy].erase(_rows[_cy].begin() + _cx);
@@ -2024,7 +2303,17 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     [self setNeedsDisplay:YES];
 }
 
+- (void)moveCursor:(int)direction extendSelection:(BOOL)extendSelection {
+    if (extendSelection && !_hasSelection) {
+        _selectionAnchor = Position{_cy, _cx};
+        _hasSelection = true;
+    }
+    [self moveCursor:direction];
+    if (!extendSelection) _hasSelection = false;
+}
+
 - (void)duplicateLine {
+    [self pushUndo];
     _rows.insert(_rows.begin() + _cy + 1, _rows[_cy]);
     [self recordEditAtRow:_cy + 1 col:0 ch:'=' deletion:NO];
     ++_cy;
@@ -2035,6 +2324,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 }
 
 - (void)toggleComment {
+    [self pushUndo];
     std::string& line = _rows[_cy];
     std::size_t indent = 0;
     while (indent < line.size() && std::isspace(static_cast<unsigned char>(line[indent]))) ++indent;
@@ -2062,6 +2352,68 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     }
     [self markHighlightDirty];
     [self setStatus:"Language: " + languageName(_language) + "."];
+}
+
+- (std::optional<FoldRange>)foldAtStart:(int)row {
+    for (const FoldRange& fold : _folds) {
+        if (fold.start == row) return fold;
+    }
+    return std::nullopt;
+}
+
+- (BOOL)isFoldInterior:(int)row {
+    for (const FoldRange& fold : _folds) {
+        if (row > fold.start && row <= fold.end) return YES;
+    }
+    return NO;
+}
+
+- (void)toggleFoldAtCursor {
+    for (auto it = _folds.begin(); it != _folds.end(); ++it) {
+        if (it->start == _cy || (_cy > it->start && _cy <= it->end)) {
+            _folds.erase(it);
+            [self setStatus:"Fold opened."];
+            [self setNeedsDisplay:YES];
+            return;
+        }
+    }
+    int startRow = _cy;
+    int startCol = -1;
+    char open = '\0';
+    for (int row = _cy; row >= 0 && row >= _cy - 8; --row) {
+        for (int col = static_cast<int>(_rows[row].size()) - 1; col >= 0; --col) {
+            char c = _rows[row][col];
+            if (c == '{' || c == '(' || c == '[') {
+                startRow = row;
+                startCol = col;
+                open = c;
+                break;
+            }
+        }
+        if (open) break;
+    }
+    if (!open) {
+        [self setStatus:"No foldable block nearby."];
+        return;
+    }
+    char close = matchingBracket(open);
+    int depth = 0;
+    for (int row = startRow; row < static_cast<int>(_rows.size()); ++row) {
+        int colStart = row == startRow ? startCol : 0;
+        for (int col = colStart; col < static_cast<int>(_rows[row].size()); ++col) {
+            if (_rows[row][col] == open) ++depth;
+            else if (_rows[row][col] == close) {
+                --depth;
+                if (depth == 0 && row > startRow) {
+                    _folds.push_back(FoldRange{startRow, row});
+                    [self setStatus:"Folded lines " + std::to_string(startRow + 1) + "-" + std::to_string(row + 1) + "."];
+                    [self setNeedsDisplay:YES];
+                    return;
+                }
+            }
+        }
+    }
+    [self setStatus:"No matching fold end found."];
 }
 
 - (void)findNext:(BOOL)forward fromCurrent:(BOOL)fromCurrent {
@@ -2098,6 +2450,41 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         }
     }
     [self setStatus:"No match."];
+}
+
+- (void)replaceFromPrompt:(const std::string&)value {
+    std::string needle;
+    std::string replacement;
+    std::size_t arrow = value.find("=>");
+    if (arrow != std::string::npos) {
+        needle = trim(value.substr(0, arrow));
+        replacement = trim(value.substr(arrow + 2));
+    } else {
+        std::size_t slash = value.find('/');
+        if (slash != std::string::npos) {
+            needle = value.substr(0, slash);
+            replacement = value.substr(slash + 1);
+        }
+    }
+    if (needle.empty()) {
+        [self setStatus:"Replace format: old => new"];
+        return;
+    }
+    [self pushUndo];
+    int count = 0;
+    for (std::string& row : _rows) {
+        std::size_t pos = row.find(needle);
+        while (pos != std::string::npos) {
+            row.replace(pos, needle.size(), replacement);
+            pos = row.find(needle, pos + replacement.size());
+            ++count;
+        }
+    }
+    _searchTerm = replacement.empty() ? needle : replacement;
+    _dirty = count > 0 || _dirty;
+    [self updateWindowTitle];
+    [self markHighlightDirty];
+    [self setStatus:"Replaced " + std::to_string(count) + " occurrence(s)."];
 }
 
 - (void)updateBracketMatch {
@@ -2296,6 +2683,33 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 - (void)appendConsole:(const std::string&)line {
     _console.push_back(line);
     if (_console.size() > 160) _console.erase(_console.begin(), _console.begin() + static_cast<long>(_console.size() - 160));
+    std::string lower = toLower(line);
+    bool looksLikeError = lower.find("error") != std::string::npos ||
+        lower.find("exception") != std::string::npos ||
+        lower.find("syntax") != std::string::npos;
+    if (!looksLikeError) return;
+
+    int parsedLine = -1;
+    std::size_t marker = lower.find("line");
+    if (marker != std::string::npos) {
+        marker += 4;
+        while (marker < lower.size() && !std::isdigit(static_cast<unsigned char>(lower[marker]))) ++marker;
+        if (marker < lower.size()) parsedLine = std::max(1, std::atoi(lower.c_str() + marker));
+    }
+    if (parsedLine < 0) {
+        for (std::size_t i = 0; i + 2 < lower.size(); ++i) {
+            if (lower[i] == ':' && std::isdigit(static_cast<unsigned char>(lower[i + 1]))) {
+                parsedLine = std::max(1, std::atoi(lower.c_str() + i + 1));
+                break;
+            }
+        }
+    }
+    if (parsedLine > 0 && parsedLine <= static_cast<int>(_rows.size())) {
+        _errorLine = parsedLine - 1;
+        _cy = _errorLine;
+        _cx = std::min<int>(_cx, _rows[_cy].size());
+        [self setStatus:"Runner error highlighted on line " + std::to_string(parsedLine) + "."];
+    }
 }
 
 @end

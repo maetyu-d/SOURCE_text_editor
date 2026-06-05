@@ -513,7 +513,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
 
 } // namespace
 
-@interface SourCeView : NSView
+@interface SourCeView : NSView <NSDraggingDestination>
 @end
 
 @implementation SourCeView {
@@ -616,6 +616,7 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
         [self refreshProjectFiles];
         [self loadWelcome];
         [self setWantsLayer:YES];
+        [self registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
     }
     return self;
 }
@@ -890,6 +891,32 @@ std::vector<Kind> highlightLine(const std::string& line, Language lang, bool& in
     [panel beginSheetModalForWindow:[self window] completionHandler:^(NSModalResponse result) {
         if (result == NSModalResponseOK) [self loadFileAtPath:[[panel URL] path]];
     }];
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    NSPasteboard* pasteboard = [sender draggingPasteboard];
+    NSArray<NSURL*>* urls = [pasteboard readObjectsForClasses:@[[NSURL class]]
+                                                      options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+    return [urls count] > 0 ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+- (BOOL)prepareForDragOperation:(id<NSDraggingInfo>)sender {
+    (void)sender;
+    return YES;
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    NSPasteboard* pasteboard = [sender draggingPasteboard];
+    NSArray<NSURL*>* urls = [pasteboard readObjectsForClasses:@[[NSURL class]]
+                                                      options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+    BOOL openedAny = NO;
+    for (NSURL* url in urls) {
+        if (![url isFileURL]) continue;
+        if (!openedAny && ![self confirmDiscard]) return NO;
+        openedAny = [self loadFileAtPath:[url path]] || openedAny;
+    }
+    if (openedAny) [self setNeedsDisplay:YES];
+    return openedAny;
 }
 
 - (void)saveDocument:(id)sender {

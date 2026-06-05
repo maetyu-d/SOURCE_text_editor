@@ -1,4 +1,6 @@
 build/
+build-*/
+assets/SourCe.iconset/
 .DS_Store
 *.o
 *.dSYM/

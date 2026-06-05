@@ -33,6 +33,9 @@ Release zip:
 open SourCe.app
 ```
 
+You can also drop `.scd`, `.sc`, `.ck`, C/C++/Objective-C++, or text files
+directly onto the SourCe window to open them.
+
 ## Controls
 
 | Key | Action |
